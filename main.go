@@ -9,54 +9,16 @@ import (
 	"path"
 )
 
-func DefaultHandler(wr http.ResponseWriter, req *http.Request) {
-
-	fmt.Println(req.RemoteAddr, " ", req.Method, " ", req.URL)
-
-	if u, err := url.Parse(req.URL.String()); err == nil {
-		filename := path.Base(u.Path)
-
-		fmt.Println("文件名:", filename)
-
-		//查找本地文件名是否存在
-		filePath := fmt.Sprintf("./%s", filename)
-
-		fmt.Println(filePath)
-
-		if file, err := os.Open(filePath); err == nil {
-			defer file.Close()
-			fmt.Println("本地文件存在")
-
-			client := &http.Client{}
-			req.RequestURI = ""
-
-
-
-			//获取远程文件信息
-			if resp, err := client.Do(req); err == nil {
-				defer resp.Body.Close()
-				header := wr.Header()
-
-				for k, h := range resp.Header {
-					for _, v := range h {
-						fmt.Println("Header:", k, "=", v)
-						header.Add(k, v)
-
-					}
-				}
-
-				wr.WriteHeader(resp.StatusCode)
-				io.Copy(wr, file)
-			}
-
-			return
+func copyHeader(dest *http.Header, src http.Header) {
+	for k, h := range src {
+		for _, v := range h {
+			dest.Add(k, v)
 		}
-
-	} else {
-		panic(err)
 	}
+}
 
-	//透传请求
+func passThrough(wr http.ResponseWriter, req *http.Request) {
+	//passthrough request
 	client := &http.Client{}
 	req.RequestURI = ""
 
@@ -68,31 +30,59 @@ func DefaultHandler(wr http.ResponseWriter, req *http.Request) {
 
 		//copy header
 		header := wr.Header()
+		copyHeader(&header, resp.Header)
 
-		for k, h := range resp.Header {
-			for _, v := range h {
-				fmt.Println("Header:", k, "=", v)
-				header.Add(k, v)
+		//set status code
+		wr.WriteHeader(resp.StatusCode)
 
+		//TODO: cache downloaded file, only oct-stream
+		io.Copy(wr, resp.Body)
+	} else {
+		fmt.Println("passthrough error:", err)
+	}
+}
+
+func proxyHandler(wr http.ResponseWriter, req *http.Request) {
+
+	//log any request
+	fmt.Println("From:", req.RemoteAddr, " ", req.Method, " ", req.URL)
+
+	//TODO: match specified files(regex)
+	//TODO：support, Header: Accept-Ranges = bytes
+	//TODO: only binary stream, Header: Content-Type = application/octet-stream
+
+	if u, err := url.Parse(req.URL.String()); err == nil {
+		filename := path.Base(u.Path)
+
+		//check if exist
+		filePath := fmt.Sprintf("./%s", filename)
+
+		fmt.Println(filePath)
+
+		if fileInfo, err := os.Stat(filePath); err == nil {
+			fmt.Printf("Local file exist {%d}. return from local file stream", fileInfo.Size())
+
+			if file, _ := os.Open(filePath); err == nil {
+				defer file.Close()
+				fmt.Println("Return from local file stream")
+
+				header := wr.Header()
+				header.Add("Content-Length", fmt.Sprint(fileInfo.Size()))
+				wr.WriteHeader(200)
+				io.Copy(wr, file)
+				return
 			}
 		}
 
-		fmt.Println("new response headers:")
-		fmt.Println(header)
-
-		wr.WriteHeader(resp.StatusCode)
-		io.Copy(wr, resp.Body)
-
 	} else {
-
-		fmt.Println(err)
+		panic(err)
 	}
 
+	passThrough(wr, req)
 }
 
 func main() {
-	fmt.Println("start...")
-
-	http.HandleFunc("/", DefaultHandler)
+	fmt.Println("Start Proxy...")
+	http.HandleFunc("/", proxyHandler)
 	http.ListenAndServe(":8000", nil)
 }
